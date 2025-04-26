@@ -6,7 +6,22 @@ import mongoose from 'mongoose'; // <<< Импортируй mongoose для п�
 
 // GET /api/tasks - (Без изменений)
 export const getTasks = async (req: Request, res: Response) => {
-  // ... (код остается прежним)
+  try {
+    if (!req.userId) {
+      // Проверка, что middleware отработал
+      return res.status(401).json({ message: 'User ID not found in request after authentication' });
+    }
+    // Ищем задачи, где поле 'owner' равно ID аутентифицированного пользователя
+    const tasks = await Task.find({ owner: req.userId });
+    // Или, если пользователь должен видеть и те, что ему назначены:
+    // const tasks = await Task.find({ $or: [{ owner: req.userId }, { 'assignee.id': req.userId }] });
+    console.log(`Fetched ${tasks.length} tasks for user ${req.userId}`);
+    res.json(tasks); // Отправляем найденные задачи
+  } catch (err) {
+    const error = err as Error;
+    console.error('Error fetching tasks:', error);
+    res.status(500).json({ message: 'Server error fetching tasks', error: error.message });
+  }
 };
 
 // POST /api/tasks - Создание задачи (ИСПРАВЛЕНО)
