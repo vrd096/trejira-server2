@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# Игнорировать ключи сервисных аккаунтов Google
+trejira-aee68ae2f4f2.json
+*.json
