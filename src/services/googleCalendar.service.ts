@@ -10,7 +10,6 @@ const { GOOGLE_SERVICE_ACCOUNT_KEY_FILENAME, GOOGLE_SHARED_CALENDAR_ID, TARGET_T
 const SCOPES = ['https://www.googleapis.com/auth/calendar.events'];
 
 // Переменная для хранения инициализированного клиента API Calendar
-// Используем тип из googleapis для лучшей поддержки TypeScript
 let calendar: calendar_v3.Calendar | null = null;
 let keyPath: string | null = null; // Храним путь к ключу
 
@@ -30,7 +29,7 @@ const initializeCalendarClient = async (): Promise<calendar_v3.Calendar | null> 
   }
   if (!TARGET_TIMEZONE) {
     console.error('Google Calendar Service Error: TARGET_TIMEZONE is not defined in config.');
-    return null; // Часовой пояс важен
+    return null;
   }
 
   // Строим абсолютный путь к файлу ключа от корня проекта
@@ -55,8 +54,9 @@ const initializeCalendarClient = async (): Promise<calendar_v3.Calendar | null> 
     calendar = google.calendar({ version: 'v3', auth });
     console.log('✅ Google Calendar client initialized successfully.');
     return calendar;
-  } catch (error) {
-    console.error('❌ Error initializing Google Calendar client:', error);
+  } catch (error: any) {
+    // Добавил any для доступа к message
+    console.error('❌ Error initializing Google Calendar client:', error.message || error);
     calendar = null; // Сбрасываем клиент при ошибке
     return null;
   }
@@ -73,7 +73,7 @@ export const createCalendarEvent = async (task: ITask): Promise<string | null> =
       return null;
     }
   }
-  // Дополнительная проверка на случай, если инициализация была неуспешной
+  // Дополнительная проверка
   if (!calendar || !GOOGLE_SHARED_CALENDAR_ID) {
     console.error(
       'Cannot create calendar event: Client or Calendar ID is missing after init attempt.',
@@ -101,7 +101,9 @@ export const createCalendarEvent = async (task: ITask): Promise<string | null> =
 
     // Формируем объект события для API
     const event: calendar_v3.Schema$Event = {
-      summary: `${task.title} (Испольнитель: ${task.assignee?.name || 'Неизвестный'})`, // Добавляем имя в название
+      // Убираем добавление assignee в название, используем только оригинальное
+      summary: task.title,
+      // Оставляем описание без изменений или добавляем email если нужно
       description: `Task Description: ${task.description || 'No description.'}\n\nAssigned to: ${
         task.assignee?.email || 'N/A'
       }`, // Добавляем email в описание
@@ -113,10 +115,11 @@ export const createCalendarEvent = async (task: ITask): Promise<string | null> =
         dateTime: endTime.toISOString(),
         timeZone: TARGET_TIMEZONE,
       },
-      // attendees: task.assignee ? [{ email: task.assignee.email }] : [], // <<< УБИРАЕМ УЧАСТНИКОВ
+      // Убираем attendees чтобы избежать ошибки 403
+      // attendees: task.assignee ? [{ email: task.assignee.email }] : [],
       reminders: {
         useDefault: false,
-        overrides: [{ method: 'popup', minutes: 180 }],
+        overrides: [{ method: 'popup', minutes: 180 }], // Напоминание за 3 часа
       },
     };
 
@@ -129,7 +132,7 @@ export const createCalendarEvent = async (task: ITask): Promise<string | null> =
     const createdEvent = await calendar.events.insert({
       calendarId: GOOGLE_SHARED_CALENDAR_ID,
       requestBody: event,
-      sendNotifications: true, // Отправить уведомления участникам?
+      // sendNotifications: true, // Можно убрать, так как нет attendees
     });
 
     const eventId = createdEvent.data.id;
@@ -146,20 +149,18 @@ export const createCalendarEvent = async (task: ITask): Promise<string | null> =
       error.message || error,
     );
     if (error.response?.data?.error) {
-      // Улучшенная проверка ошибки API
       console.error(
         'Google API Error Details:',
         JSON.stringify(error.response.data.error, null, 2),
       );
     } else if (error.errors) {
-      // Другой формат ошибок от googleapis
       console.error('Google API Validation Errors:', error.errors);
     }
     return null;
   }
 };
 
-// --- Функция для обновления события в календаре ---
+// --- Функция для обновления события в календаре (Вариант 1 с проверкой времени) ---
 export const updateCalendarEvent = async (
   calendarEventId: string,
   taskUpdates: Partial<ITask>,
@@ -173,41 +174,106 @@ export const updateCalendarEvent = async (
   try {
     // Формируем объект только с изменениями для API
     const eventPatch: calendar_v3.Schema$Event = {};
-    if (taskUpdates.title !== undefined) eventPatch.summary = taskUpdates.title;
-    if (taskUpdates.description !== undefined) eventPatch.description = taskUpdates.description;
+    let needsTimeCheck = false; // Флаг, что нужно проверить время
 
-    // Обновляем время окончания с указанием часового пояса
-    if (taskUpdates.deadline) {
-      const newEndTime = new Date(taskUpdates.deadline);
-      // Важно: нужно ли обновлять время начала? Зависит от логики.
-      // Обновим только конец для простоты.
-      eventPatch.end = { dateTime: newEndTime.toISOString(), timeZone: TARGET_TIMEZONE };
-      // Если нужно обновлять и начало:
-      // const newStartTime = ... ; // Рассчитать новое начало
-      // eventPatch.start = { dateTime: newStartTime.toISOString(), timeZone: TARGET_TIMEZONE };
+    // Обновляем простые поля
+    if (taskUpdates.title !== undefined) {
+      // Можно снова добавить имя исполнителя, если нужно
+      // eventPatch.summary = `${taskUpdates.title} (Испольнитель: ${taskUpdates.assignee?.name || 'Неизвестный'})`;
+      eventPatch.summary = taskUpdates.title;
+    }
+    if (taskUpdates.description !== undefined) {
+      // Можно снова добавить email исполнителя
+      // eventPatch.description = `Task Description: ${taskUpdates.description}\n\nAssigned to: ${taskUpdates.assignee?.email || 'N/A'}`;
+      eventPatch.description = taskUpdates.description;
     }
 
-    // Обновление участников (attendees) и напоминаний (reminders) через patch сложнее,
-    // часто проще сделать get -> изменить -> update, или они не меняются.
-    // Пока не обновляем их здесь.
+    // --- Обработка обновления времени ---
+    if (taskUpdates.deadline) {
+      needsTimeCheck = true; // Помечаем, что нужно проверить время перед patch
+      let newEndTime = new Date(taskUpdates.deadline);
 
-    // Проверяем, есть ли что обновлять
+      // --- Получаем текущее событие для проверки startTime ---
+      console.log(`Fetching current event ${calendarEventId} to check start time...`);
+      const currentEventResponse = await calendar.events.get({
+        calendarId: GOOGLE_SHARED_CALENDAR_ID,
+        eventId: calendarEventId,
+      });
+      const currentEventData = currentEventResponse.data;
+
+      if (!currentEventData.start?.dateTime) {
+        console.error(
+          `Could not get current start time for event ${calendarEventId}. Aborting time update.`,
+        );
+        // Не обновляем время, если не можем получить текущее начало
+        needsTimeCheck = false; // Сбрасываем флаг
+      } else {
+        const currentStartTime = new Date(currentEventData.start.dateTime);
+        console.log(`Current event start time: ${currentStartTime.toISOString()}`);
+        console.log(`New deadline (end time): ${newEndTime.toISOString()}`);
+
+        // Проверяем новый endTime относительно ТЕКУЩЕГО startTime
+        const minDurationMillis = 5 * 60 * 1000; // 5 минут
+        if (newEndTime.getTime() <= currentStartTime.getTime()) {
+          console.warn(
+            `GC Event Update Warning: New deadline is before or same as current start time. Adjusting end time.`,
+          );
+          // Устанавливаем конец через 5 минут после ТЕКУЩЕГО НАЧАЛА
+          newEndTime = new Date(currentStartTime.getTime() + minDurationMillis);
+          console.log(`Adjusted end time: ${newEndTime.toISOString()}`);
+        } else if (newEndTime.getTime() < currentStartTime.getTime() + minDurationMillis) {
+          console.warn(
+            `GC Event Update Warning: New deadline is less than 5 minutes after current start time. Adjusting end time.`,
+          );
+          newEndTime = new Date(currentStartTime.getTime() + minDurationMillis);
+          console.log(`Adjusted end time: ${newEndTime.toISOString()}`);
+        }
+
+        // Добавляем обновленное время конца в eventPatch
+        eventPatch.end = { dateTime: newEndTime.toISOString(), timeZone: TARGET_TIMEZONE };
+
+        // Важно: Если ваша логика требует, чтобы startTime ТОЖЕ менялся
+        // (например, всегда был равен времени создания задачи или всегда за N часов до deadline),
+        // то нужно обновить и eventPatch.start здесь же.
+        // Пример: если start всегда равен времени создания (нужно передать createdAt в taskUpdates):
+        // if (taskUpdates.createdAt) {
+        //    eventPatch.start = { dateTime: new Date(taskUpdates.createdAt).toISOString(), timeZone: TARGET_TIMEZONE };
+        // }
+        // Если НЕ обновляем start, он останется прежним.
+      }
+    }
+    // --- Конец обработки обновления времени ---
+
+    // Проверяем, есть ли что обновлять вообще
     if (Object.keys(eventPatch).length === 0) {
-      console.log(`No relevant fields to update in Google Calendar event ${calendarEventId}.`);
+      console.log(`No fields to update in Google Calendar event ${calendarEventId}.`);
       return true;
     }
 
-    console.log(`Updating Google Calendar event ${calendarEventId}...`);
-    await calendar.events.patch({
-      calendarId: GOOGLE_SHARED_CALENDAR_ID,
-      eventId: calendarEventId,
-      requestBody: eventPatch,
-    });
-    console.log(`Google Calendar event ${calendarEventId} updated successfully.`);
-    return true;
+    // Если время не проверялось (т.к. deadline не менялся ИЛИ произошла ошибка при get),
+    // или если проверка прошла успешно, выполняем patch
+    if (!needsTimeCheck || eventPatch.end) {
+      console.log(
+        `Updating Google Calendar event ${calendarEventId}... Patch data:`,
+        JSON.stringify(eventPatch),
+      );
+      await calendar.events.patch({
+        calendarId: GOOGLE_SHARED_CALENDAR_ID,
+        eventId: calendarEventId,
+        requestBody: eventPatch,
+      });
+      console.log(`Google Calendar event ${calendarEventId} updated successfully.`);
+      return true;
+    } else {
+      // Сюда попадем, если deadline менялся, но не удалось проверить/скорректировать время
+      console.error(
+        `Skipping calendar event update for ${calendarEventId} due to issues fetching current start time.`,
+      );
+      return false; // Или true, если обновление времени не критично
+    }
   } catch (error: any) {
     console.error(
-      `❌ Failed to update Google Calendar event ${calendarEventId}:`,
+      `❌ Failed to update or fetch Google Calendar event ${calendarEventId}:`,
       error.message || error,
     );
     if (error.response?.data?.error) {
@@ -262,6 +328,4 @@ export const deleteCalendarEvent = async (calendarEventId: string): Promise<bool
 };
 
 // --- Инициализация клиента при загрузке модуля ---
-// Можно обернуть в функцию и вызывать из app.ts после старта сервера,
-// но для простоты оставим так. Ошибка инициализации будет в логах.
 initializeCalendarClient();
