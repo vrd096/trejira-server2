@@ -7,6 +7,7 @@ export interface IUser extends Document {
   avatar?: string;
   createdAt?: Date;
   updatedAt?: Date;
+  _id: string;
 }
 
 const UserSchema = new Schema<IUser>(

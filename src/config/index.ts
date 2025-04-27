@@ -11,6 +11,8 @@ interface Config {
   GOOGLE_SERVICE_ACCOUNT_KEY_FILENAME: string; // Имя файла ключа сервисного аккаунта
   GOOGLE_SHARED_CALENDAR_ID: string; // ID общего календаря
   TARGET_TIMEZONE: string; // Целевой часовой пояс
+  JWT_ACCESS_EXPIRES_IN: number; // Время жизни токена доступа в секундах
+  JWT_SECRET: string;
 }
 
 // Проверки наличия критически важных переменных
