@@ -21,6 +21,7 @@ export interface ITask extends Document {
   calendarEventId?: string;
   createdAt?: Date;
   updatedAt?: Date;
+  isHidden?: boolean;
 }
 
 export interface CalendarEvent {

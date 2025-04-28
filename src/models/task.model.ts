@@ -19,6 +19,7 @@ const TaskSchema = new Schema(
       email: { type: String, required: true },
     },
     calendarEventId: { type: String, index: true },
+    isHidden: { type: Boolean, default: false, index: true },
   },
   {
     timestamps: true,
@@ -49,5 +50,6 @@ TaskSchema.virtual('id').get(function () {
 });
 
 TaskSchema.index({ owner: 1, status: 1 });
+TaskSchema.index({ owner: 1, isHidden: 1 });
 
 export const Task = model<ITask>('Task', TaskSchema);

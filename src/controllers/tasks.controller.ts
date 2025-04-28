@@ -1,232 +1,261 @@
+// src/controllers/tasks.controller.ts
 import { Request, Response } from 'express';
 import { Task } from '../models/task.model';
-import { User } from '../models/user.model'; // <<< Импортируй модель User
-import { ITask } from '../types/taskTypes';
-import mongoose from 'mongoose'; // <<< Импортируй mongoose для проверки ObjectId
+import { User } from '../models/user.model'; // Импорт модели User
+import { ITask } from '../types/taskTypes'; // Импорт типа ITask
+import mongoose from 'mongoose'; // Импорт mongoose
 import {
   createCalendarEvent,
   updateCalendarEvent,
   deleteCalendarEvent,
-} from '../services/googleCalendar.service';
+} from '../services/googleCalendar.service'; // Импорт сервисов календаря
 
-// GET /api/tasks - (Без изменений)
+// --- GET /api/tasks ---
+// Получение задач для аутентифицированного пользователя
 export const getTasks = async (req: Request, res: Response) => {
   try {
     if (!req.userId) {
-      // Проверка, что middleware отработал
-      return res.status(401).json({ message: 'User ID not found in request after authentication' });
+      return res.status(401).json({ message: 'User ID not found after authentication' });
     }
-    // Ищем задачи, где поле 'owner' равно ID аутентифицированного пользователя
-    const tasks = await Task.find({ owner: req.userId });
-    // Или, если пользователь должен видеть и те, что ему назначены:
-    // const tasks = await Task.find({ $or: [{ owner: req.userId }, { 'assignee.id': req.userId }] });
+    // Ищем задачи, принадлежащие пользователю (или назначенные ему, если нужно)
+    const tasks = await Task.find({ owner: req.userId }).sort({ createdAt: -1 }); // Сортируем по дате создания
     console.log(`Fetched ${tasks.length} tasks for user ${req.userId}`);
-    res.json(tasks); // Отправляем найденные задачи
-  } catch (err) {
-    const error = err as Error;
-    console.error('Error fetching tasks:', error);
-    res.status(500).json({ message: 'Server error fetching tasks', error: error.message });
+    res.status(200).json(tasks); // Отправляем найденные задачи
+  } catch (err: any) {
+    console.error('Error fetching tasks:', err);
+    res.status(500).json({ message: 'Server error fetching tasks', error: err.message });
   }
 };
 
-// POST /api/tasks - Создание задачи (ИСПРАВЛЕНО)
+// --- POST /api/tasks ---
+// Создание новой задачи
 export const createTask = async (req: Request, res: Response) => {
   try {
-    // req.userId - это MongoDB ID аутентифицированного пользователя (владельца)
-    // req.user - это объект пользователя из MongoDB
     if (!req.userId || !req.user) {
       return res.status(401).json({ message: 'User not properly authenticated' });
     }
 
-    // Данные из тела запроса (от клиента)
     const clientTaskData = req.body;
+    let finalAssignee = { id: '', name: '', email: '' };
 
-    // --- Определяем Assignee ---
-    let finalAssignee = {
-      id: '', // Сюда нужно записать MongoDB ObjectId
-      name: '',
-      email: '',
-    };
-
-    // Пытаемся определить assignee из данных клиента, ИЛИ назначаем владельцу
-    if (clientTaskData.assignee && clientTaskData.assignee.email) {
-      // Если клиент прислал email исполнителя
+    // Определяем исполнителя (Assignee)
+    if (clientTaskData.assignee?.email) {
       console.log(`Assignee email provided by client: ${clientTaskData.assignee.email}`);
       const assigneeUser = await User.findOne({ email: clientTaskData.assignee.email });
-
       if (!assigneeUser) {
-        console.warn(`Assignee user with email ${clientTaskData.assignee.email} not found in DB.`);
         return res
           .status(400)
           .json({ message: `Assignee user with email ${clientTaskData.assignee.email} not found` });
       }
-
-      // Используем данные найденного пользователя
-      finalAssignee.id = assigneeUser.id.toString(); // <<< MongoDB ObjectId
-      finalAssignee.name = assigneeUser.name;
-      finalAssignee.email = assigneeUser.email;
+      finalAssignee = {
+        id: assigneeUser._id.toString(),
+        name: assigneeUser.name,
+        email: assigneeUser.email,
+      };
       console.log(`Found assignee user in DB: ${finalAssignee.name} (ID: ${finalAssignee.id})`);
     } else {
-      // Если клиент НЕ прислал email (или объект assignee), назначаем задачу владельцу
-      console.log('Assignee email not provided by client, assigning task to the owner.');
-      finalAssignee.id = req.userId; // <<< MongoDB ObjectId владельца
-      finalAssignee.name = req.user.name;
-      finalAssignee.email = req.user.email;
+      console.log('Assignee email not provided, assigning task to the owner.');
+      finalAssignee = { id: req.userId, name: req.user.name, email: req.user.email };
     }
 
-    // Проверка: убедимся, что finalAssignee.id - валидный ObjectId перед созданием Task
+    // Проверка валидности ID исполнителя
     if (!mongoose.Types.ObjectId.isValid(finalAssignee.id)) {
       console.error(
-        `Critical Error: finalAssignee.id (${finalAssignee.id}) is not a valid ObjectId before saving task.`,
+        `Critical Error: finalAssignee.id (${finalAssignee.id}) is not valid ObjectId.`,
       );
       return res.status(500).json({ message: 'Internal error processing assignee information.' });
     }
 
-    // --- Создаем финальный объект задачи для сохранения ---
-    const taskToSaveData = {
-      ...clientTaskData, // Берем title, description, status, deadline от клиента
-      owner: req.userId, // Устанавливаем владельца (MongoDB ObjectId)
-      assignee: finalAssignee, // Устанавливаем исполнителя с КОРРЕКТНЫМ MongoDB ObjectId в id
+    // Формируем данные для сохранения
+    const taskToSaveData: Partial<ITask> & { owner: string } = {
+      ...clientTaskData, // title, description, status, deadline etc.
+      owner: req.userId, // Устанавливаем владельца
+      assignee: finalAssignee, // Устанавливаем исполнителя
+      isHidden: false, // Новые задачи всегда активны
     };
-
-    // Удаляем potentially problematic id из assignee если он пришел от клиента с google id
-    // Mongoose должен использовать finalAssignee.id
-    // delete taskToSaveData.assignee.id; // Можно раскомментировать если будут проблемы
 
     console.log('Final task data before saving:', JSON.stringify(taskToSaveData, null, 2));
 
+    // Сохраняем задачу в MongoDB
     const task = new Task(taskToSaveData);
-    const savedTask = await task.save(); // <<< Сохраняем в переменную
-
+    const savedTask = await task.save();
     console.log(
-      `Task created by user ${req.userId}, assigned to ${finalAssignee.email} (ID: ${finalAssignee.id}). Task ID: ${savedTask._id}`,
+      `Task ${savedTask._id} created by user ${req.userId}, assigned to ${finalAssignee.email}`,
     );
 
-    // --- Интеграция с Google Calendar ---
+    // Интеграция с Google Calendar
     console.log('Attempting to create Google Calendar event...');
-    const calendarEventId = await createCalendarEvent(savedTask); // <<< Вызываем создание события
-
+    const calendarEventId = await createCalendarEvent(savedTask);
     if (calendarEventId) {
-      // Опционально: Сохраняем ID события календаря в задаче MongoDB
       savedTask.calendarEventId = calendarEventId;
-      await savedTask.save(); // Сохраняем задачу еще раз с ID события
+      await savedTask.save(); // Сохраняем ID события в задаче
       console.log(`Saved Calendar Event ID ${calendarEventId} to task ${savedTask._id}`);
     } else {
       console.warn(`Could not create Google Calendar event for task ${savedTask._id}`);
-      // Не возвращаем ошибку клиенту, задача в MongoDB создана
     }
-    // -----------------------------------
 
-    // Возвращаем созданную задачу (уже с calendarEventId, если он был сохранен)
+    // Возвращаем созданную задачу клиенту
     res.status(201).json(savedTask);
   } catch (err: any) {
     console.error('Error creating task:', err);
     if (err.name === 'ValidationError') {
-      // Логируем детали ошибки валидации
       console.error('Validation Errors:', JSON.stringify(err.errors, null, 2));
       return res
         .status(400)
         .json({ message: 'Validation Error creating task', errors: err.errors });
     }
-    // Обработка других возможных ошибок (например, CastError, если deadline неверный)
     res.status(400).json({ message: 'Error creating task', error: err.message });
   }
 };
 
-// PUT /api/tasks/:id - Обновление задачи (Проверь логику assignee)
+// --- PUT /api/tasks/:id ---
+// Обновление существующей задачи
 export const updateTask = async (req: Request, res: Response) => {
   try {
     if (!req.userId) {
-      return res.status(401).json({ message: 'User ID not found in request after authentication' });
+      return res.status(401).json({ message: 'User ID not found after authentication' });
     }
     const taskId = req.params.id;
-    const updates = req.body;
+    // Проверяем валидность taskId перед запросом к базе
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res.status(400).json({ message: 'Invalid Task ID format' });
+    }
 
-    // Запрещаем смену владельца
-    delete updates.owner;
+    const updatesFromBody = req.body;
 
-    // --- Обработка обновления Assignee ---
-    if (updates.assignee && updates.assignee.email) {
-      // Если клиент хочет изменить assignee по email
-      console.log(`Attempting to update assignee by email: ${updates.assignee.email}`);
-      const newAssigneeUser = await User.findOne({ email: updates.assignee.email });
-      if (!newAssigneeUser) {
-        return res.status(400).json({
-          message: `Cannot update: Assignee user with email ${updates.assignee.email} not found`,
-        });
+    // --- Проверка прав доступа ---
+    // Находим задачу, чтобы убедиться, что пользователь является владельцем
+    const taskToUpdate = await Task.findOne({ _id: taskId, owner: req.userId });
+    if (!taskToUpdate) {
+      // Проверяем, существует ли задача вообще
+      const taskExists = await Task.findById(taskId);
+      if (!taskExists) {
+        return res.status(404).json({ message: 'Task not found' });
+      } else {
+        console.warn(
+          `User ${req.userId} attempted to update task ${taskId} owned by another user.`,
+        );
+        return res.status(403).json({ message: 'Forbidden: You do not own this task' });
       }
-      // Заменяем объект assignee в updates на объект с MongoDB ID
-      updates.assignee = {
-        id: newAssigneeUser._id, // <<< MongoDB ObjectId
+    }
+    // --------------------------
+
+    // --- Обработка обновления Assignee (если нужно) ---
+    if (updatesFromBody.assignee && updatesFromBody.assignee.email) {
+      console.log(`Attempting to update assignee by email: ${updatesFromBody.assignee.email}`);
+      const newAssigneeUser = await User.findOne({ email: updatesFromBody.assignee.email });
+      if (!newAssigneeUser) {
+        return res
+          .status(400)
+          .json({
+            message: `Cannot update: Assignee user with email ${updatesFromBody.assignee.email} not found`,
+          });
+      }
+      // Заменяем объект assignee на корректный
+      updatesFromBody.assignee = {
+        id: newAssigneeUser._id,
         name: newAssigneeUser.name,
         email: newAssigneeUser.email,
       };
-      console.log(`Updating assignee to: ${updates.assignee.name} (ID: ${updates.assignee.id})`);
-    } else if (updates.assignee) {
-      // Если клиент прислал объект assignee, но без email (или с ID),
-      // это может вызвать проблемы. Лучше удалить его из updates,
-      // если мы не поддерживаем смену assignee по ID напрямую от клиента.
-      console.warn('Received assignee update without email. Ignoring assignee update.');
-      delete updates.assignee;
+      console.log(
+        `Updating assignee to: ${updatesFromBody.assignee.name} (ID: ${updatesFromBody.assignee.id})`,
+      );
+    } else if ('assignee' in updatesFromBody) {
+      // Проверяем, если assignee передан, но без email
+      console.warn(
+        'Received assignee update without email or invalid format. Ignoring assignee update.',
+      );
+      delete updatesFromBody.assignee; // Игнорируем некорректное обновление assignee
     }
+    // ---------------------------------------------
 
-    // Находим задачу и проверяем права (владелец)
-    const updatedTask = await Task.findByIdAndUpdate(taskId, updates, {
-      new: true,
-      runValidators: true,
+    // Запрещаем смену владельца через этот эндпоинт
+    delete updatesFromBody.owner;
+    // Удаляем поля, которые не должны обновляться напрямую (если такие есть)
+    delete updatesFromBody.createdAt;
+    delete updatesFromBody.updatedAt;
+    delete updatesFromBody.id; // Удаляем 'id', если клиент его прислал
+    delete updatesFromBody._id;
+
+    console.log(`Applying updates to task ${taskId}:`, JSON.stringify(updatesFromBody, null, 2));
+
+    // Обновляем задачу в MongoDB
+    // findByIdAndUpdate найдет по _id и применит обновления
+    const updatedTask = await Task.findByIdAndUpdate(taskId, updatesFromBody, {
+      new: true, // Вернуть обновленный документ
+      runValidators: true, // Применить валидаторы схемы
     });
 
+    // Проверка, что обновление прошло успешно
     if (!updatedTask) {
-      // Задача не найдена или не обновлена (хотя findOne должен был ее найти)
-      return res.status(404).json({ message: 'Task not found after update attempt' });
+      console.error(`Failed to update task ${taskId} even after permission check.`);
+      return res.status(404).json({ message: 'Task not found or failed to update' });
     }
 
-    console.log(`Task ${taskId} updated in DB by user ${req.userId}`);
+    console.log(
+      `Task ${taskId} updated in DB by user ${req.userId}. New status: ${updatedTask.status}, isHidden: ${updatedTask.isHidden}`,
+    );
 
-    // --- Обновляем событие в Google Calendar, если есть ID ---
-    if (updatedTask.calendarEventId) {
+    // --- Обновляем событие в Google Calendar, если нужно ---
+    // Обновляем, если изменились поля, влияющие на календарь, И если есть calendarEventId
+    if (
+      updatedTask.calendarEventId &&
+      (updatesFromBody.deadline || updatesFromBody.title || updatesFromBody.description)
+    ) {
       console.log(`Attempting to update Google Calendar event ${updatedTask.calendarEventId}...`);
-      await updateCalendarEvent(updatedTask.calendarEventId, updates); // Передаем только обновления
-    } else {
-      // Если ID события нет, но дедлайн обновился, можно попытаться создать новое?
-      console.warn(`Task ${taskId} updated, but no associated Calendar Event ID found.`);
-      // Можно попытаться создать событие, если его не было:
-      // if (updates.deadline || updates.title) {
-      //    const newCalendarEventId = await createCalendarEvent(updatedTask);
-      //    if (newCalendarEventId) {
-      //       updatedTask.calendarEventId = newCalendarEventId;
-      //       await updatedTask.save();
-      //    }
-      // }
+      await updateCalendarEvent(updatedTask.calendarEventId, {
+        // Передаем только те поля, которые могли измениться
+        title: updatesFromBody.title,
+        description: updatesFromBody.description,
+        deadline: updatesFromBody.deadline,
+      });
+    } else if (!updatedTask.calendarEventId && updatesFromBody.deadline) {
+      // Опционально: если у обновленной задачи НЕТ calendarEventId, но появился/изменился deadline,
+      // можно попытаться создать событие заново. Раскомментируй, если нужна эта логика.
+      /*
+        console.warn(`Task ${taskId} updated with deadline, but no associated Calendar Event ID found. Attempting to create one.`);
+        const newCalendarEventId = await createCalendarEvent(updatedTask);
+        if (newCalendarEventId) {
+           updatedTask.calendarEventId = newCalendarEventId;
+           await updatedTask.save(); // Сохраняем новый ID в задаче
+        }
+        */
     }
     // ----------------------------------------------------
 
-    res.json(updatedTask); // Возвращаем обновленную задачу
+    res.status(200).json(updatedTask); // Возвращаем обновленную задачу
   } catch (err: any) {
-    console.error('Error updating task:', err);
+    console.error(`Error updating task ${req.params.id}:`, err);
     if (err.name === 'ValidationError') {
       console.error('Validation Errors:', JSON.stringify(err.errors, null, 2));
       return res
         .status(400)
         .json({ message: 'Validation Error updating task', errors: err.errors });
     }
-    if (err.name === 'CastError')
-      return res.status(400).json({ message: 'Invalid Task ID format' });
-    res.status(400).json({ message: 'Error updating task', error: err.message });
+    if (err.name === 'CastError') {
+      return res
+        .status(400)
+        .json({ message: 'Invalid Task ID format or other casting error', path: err.path });
+    }
+    res.status(500).json({ message: 'Server error updating task', error: err.message });
   }
 };
-// DELETE /api/tasks/:id - Удаление задачи
+
+// --- DELETE /api/tasks/:id ---
+// Удаление задачи
 export const deleteTask = async (req: Request, res: Response) => {
   try {
     if (!req.userId) {
-      return res.status(401).json({ message: 'User ID not found in request after authentication' });
+      return res.status(401).json({ message: 'User ID not found after authentication' });
     }
     const taskId = req.params.id;
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return res.status(400).json({ message: 'Invalid Task ID format' });
+    }
 
-    // Находим задачу и проверяем права доступа (владелец)
-    const task = await Task.findOne({ _id: taskId, owner: req.userId });
-
-    if (!task) {
+    // Находим задачу ДО удаления для проверки прав и получения calendarEventId
+    const taskToDelete = await Task.findOne({ _id: taskId, owner: req.userId });
+    if (!taskToDelete) {
       const taskExists = await Task.findById(taskId);
       if (!taskExists) {
         return res.status(404).json({ message: 'Task not found' });
@@ -237,22 +266,31 @@ export const deleteTask = async (req: Request, res: Response) => {
         return res.status(403).json({ message: 'Forbidden: You do not own this task' });
       }
     }
-    // --- Удаляем событие из Google Calendar, если есть ID ---
-    if (task && task.calendarEventId) {
-      console.log(`Attempting to delete Google Calendar event ${task.calendarEventId}...`);
-      await deleteCalendarEvent(task.calendarEventId);
+
+    const calendarEventIdToDelete = taskToDelete.calendarEventId; // Сохраняем ID
+
+    // --- Удаляем событие из Google Calendar, если оно было ---
+    if (calendarEventIdToDelete) {
+      console.log(`Attempting to delete Google Calendar event ${calendarEventIdToDelete}...`);
+      const deletedFromCalendar = await deleteCalendarEvent(calendarEventIdToDelete);
+      if (!deletedFromCalendar) {
+        console.warn(
+          `Failed or unable to delete Google Calendar event ${calendarEventIdToDelete}, but proceeding with task deletion.`,
+        );
+        // Не блокируем удаление задачи, если календарь не удалился
+      }
     }
     // ----------------------------------------------------
-    // Удаляем задачу
+
+    // Удаляем задачу из MongoDB
     await Task.findByIdAndDelete(taskId);
 
     console.log(`Task ${taskId} deleted by user ${req.userId}`);
-    // Отправляем ID удаленной задачи или просто сообщение об успехе
-    // res.json({ message: 'Task deleted successfully', deletedTaskId: taskId });
-    res.status(200).json({ message: 'Task deleted' }); // 200 OK или 204 No Content
+    res.status(200).json({ message: 'Task deleted successfully', deletedTaskId: taskId }); // Возвращаем ID клиенту
   } catch (err: any) {
-    console.error('Error deleting task:', err);
+    console.error(`Error deleting task ${req.params.id}:`, err);
     if (err.name === 'CastError') {
+      // Хотя мы уже проверили ID
       return res.status(400).json({ message: 'Invalid Task ID format' });
     }
     res.status(500).json({ message: 'Server error deleting task', error: err.message });
