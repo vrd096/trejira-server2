@@ -7,7 +7,7 @@ import config from './config';
 import apiRouter from './routes/api';
 import { setupWebSocket } from './services/websocket.service';
 import { errorHandler } from './middleware/errorHandler';
-// import { authenticateUser } from './middleware/authMiddleware';
+import cookieParser from 'cookie-parser';
 
 const app = express();
 const server = createServer(app);
@@ -41,6 +41,7 @@ app.use(
 );
 app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
 
 // Routes
 // app.use('/api', authenticateUser, apiRouter);

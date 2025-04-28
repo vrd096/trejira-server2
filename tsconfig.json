@@ -8,9 +8,10 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
-    "moduleResolution": "node",
-    "types": ["node"]
+    "moduleResolution": "node"
+    // "types": ["node"] // <<< УДАЛИ ИЛИ ЗАКОММЕНТИРУЙ ЭТУ СТРОКУ
   },
-  "include": ["src/**/*"],
+  // include выглядит нормально, можно даже упростить
+  "include": ["src/**/*"], // Этот шаблон должен включать все .ts, .tsx, .d.ts в src
   "exclude": ["node_modules"]
 }
